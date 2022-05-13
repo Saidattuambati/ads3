@@ -1,0 +1,185 @@
+# the important libraries
+import csv
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+from scipy.cluster.hierarchy import dendrogram, cut_tree, linkage
+from scipy.optimize import curve_fit
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
+# loading the dataset
+
+data_list = []
+count = 0
+with open('dataset/API_19_DS2_en_csv_v2_4028487.csv', 'r') as file:
+    csv_reader = csv.reader(file, delimiter = ',')
+    for row_instance in csv_reader:
+        if count >= 4:
+            data_list.append(row_instance)
+        count += 1
+        
+
+df = pd.DataFrame(np.array(data_list)[1:, :], columns = np.array(data_list)[0])
+
+
+# interpreting empty strings as missing values or NaN values
+df[df == ''] = np.nan
+df.iloc[:, 4:] = df.iloc[:, 4:].astype('float')
+
+
+# selecting the features required for clustering:
+
+## 1. CO2 emissions (kg per PPP $ of GDP)
+## 2. Energy use (kg of oil equivalent) per $1,000 GDP (constant 2017 PPP)
+
+data_clustering = df.loc[df['Indicator Name'].isin([
+                                                    'CO2 emissions (kg per PPP $ of GDP)',
+                                                    'Energy use (kg of oil equivalent) per $1,000 GDP (constant 2017 PPP)'
+                                                ]), :]
+
+
+# data analysis with the selected features as indicators per country for the year, 2014
+data_2014_country = pd.pivot_table(data = data_clustering,
+                                   index = 'Country Name',
+                                   columns = 'Indicator Name',
+                                   values = '2014').dropna()
+
+
+# module for data normalization
+def normalization(d):
+    scaler_minmax = MinMaxScaler()
+    return scaler_minmax.fit_transform(d)
+
+
+# min-max scaling the data for clustering
+norm_data = normalization(data_2014_country)
+norm_data = pd.DataFrame(norm_data, 
+                         index = list(data_2014_country.index),
+                         columns = list(data_2014_country.columns))
+
+
+# dendogram visualization as a Hierarchical Clustering with Complete Linkage (closely packed clusters as much as possible)
+cluster_merges = linkage(norm_data, method = "complete", metric = 'euclidean')
+
+plt.figure(figsize = (12, 8))
+dendrogram(cluster_merges)
+plt.title('Dendogram: Hierarchical Clustering')
+plt.show()
+
+
+# cutting at height of 0.6 (average) gives 4 clusters
+cluster_hCut = pd.Series(cut_tree(cluster_merges, n_clusters = 4).reshape(-1,))
+cluster_hCut.index = data_2014_country.index
+hc_cluster_df = pd.concat([data_2014_country, cluster_hCut], axis=1)
+hc_cluster_df.columns = list(data_2014_country.columns) + ['Cluster']
+
+
+# Scatter Plot Cluster Visualization
+plt.figure(figsize = (12, 6))
+sns.scatterplot(x = 'CO2 emissions (kg per PPP $ of GDP)',
+                y = 'Energy use (kg of oil equivalent) per $1,000 GDP (constant 2017 PPP)',
+                hue = 'Cluster',
+                palette = {0 : 'red', 1: 'green', 2 : 'blue', 3 : 'black'},
+                data = hc_cluster_df)
+
+plt.title('Cluster Visualization: 2014')
+plt.show()
+
+
+#-----------------------------------------------------------------------------------------------------------------------------------#
+
+# 2014 data for training the model by curve fitting to predict Energy Usage from CO2 Emissions
+train_x = data_2014_country.reset_index()['CO2 emissions (kg per PPP $ of GDP)']
+train_y = data_2014_country.reset_index()['Energy use (kg of oil equivalent) per $1,000 GDP (constant 2017 PPP)']
+
+# function definition of the model
+def model_func(x, a, b, c):
+    return a*(x**2) + (b*x) + c
+
+# running the curve fit
+popt, pcov = curve_fit(model_func, train_x, train_y)
+
+
+# importing the given err_ranges function to find upper and lower confidence intervals
+def err_ranges(x, func, param, sigma):
+    """
+    Calculates the upper and lower limits for the function, parameters and
+    sigmas for single value or array x. Functions values are calculated for 
+    all combinations of +/- sigma and the minimum and maximum is determined.
+    Can be used for all number of parameters and sigmas >=1.
+    
+    This routine can be used in assignment programs.
+    """
+
+    import itertools as iter
+    
+    # initiate arrays for lower and upper limits
+    lower = func(x, *param)
+    upper = lower
+    
+    uplow = []   # list to hold upper and lower limits for parameters
+    for p,s in zip(param, sigma):
+        pmin = p - s
+        pmax = p + s
+        uplow.append((pmin, pmax))
+        
+    pmix = list(iter.product(*uplow))
+    
+    for p in pmix:
+        y = func(x, *p)
+        lower = np.minimum(lower, y)
+        upper = np.maximum(upper, y)
+        
+    return lower, upper   
+
+
+sigma = train_y - model_func(train_x, *popt)
+l, u = err_ranges(train_x.sort_values(), model_func, popt, sigma)
+plt.figure(figsize = (11, 5))
+plt.plot(train_x.sort_values(), l, 'r--', label = 'Lower Confidence Level')
+plt.scatter(train_x, train_y, label = 'original')
+plt.plot(train_x.sort_values(), model_func(train_x.sort_values(), *popt), color = 'red', 
+         label = 'fit: a=%5.2f, b=%5.2f, c=%5.2f' % tuple(popt))
+plt.plot(train_x.sort_values(), u, 'r--', label = 'Upper Confidence Level')
+
+plt.xlabel('CO2 emissions (kg per PPP $ of GDP)')
+plt.ylabel('Energy use (kg of oil equivalent) per $1,000 GDP (constant 2017 PPP)')
+plt.legend()
+plt.title('2014')
+plt.show()
+
+
+# picking a country from each of the 4 clusters and finding the Energy Usage from the CO2 emissions
+cluster_country0 = hc_cluster_df.loc[hc_cluster_df.Cluster == 0, :].head(1)
+train_x = cluster_country0['CO2 emissions (kg per PPP $ of GDP)']
+country = list(cluster_country0.index)[0]
+print()
+print('Energy use (kg of oil equivalent) per $1,000 GDP (constant 2017 PPP) of', country, '=', round(model_func(train_x, *popt).iloc[0], 2)
+     )
+print()
+print()
+cluster_country1 = hc_cluster_df.loc[hc_cluster_df.Cluster == 1, :].head(1)
+train_x = cluster_country1['CO2 emissions (kg per PPP $ of GDP)']
+country = list(cluster_country1.index)[0]
+print()
+print('Energy use (kg of oil equivalent) per $1,000 GDP (constant 2017 PPP) of', country, '=', round(model_func(train_x, *popt).iloc[0], 2)
+     )
+print()
+print()
+cluster_country2 = hc_cluster_df.loc[hc_cluster_df.Cluster == 2, :].head(1)
+train_x = cluster_country2['CO2 emissions (kg per PPP $ of GDP)']
+country = list(cluster_country2.index)[0]
+print()
+print('Energy use (kg of oil equivalent) per $1,000 GDP (constant 2017 PPP) of', country, '=', round(model_func(train_x, *popt).iloc[0], 2)
+     )
+print()
+print()
+cluster_country3 = hc_cluster_df.loc[hc_cluster_df.Cluster == 3, :].head(1)
+train_x = cluster_country3['CO2 emissions (kg per PPP $ of GDP)']
+country = list(cluster_country3.index)[0]
+print()
+print('Energy use (kg of oil equivalent) per $1,000 GDP (constant 2017 PPP) of', country, '=', round(model_func(train_x, *popt).iloc[0], 2)
+     )
